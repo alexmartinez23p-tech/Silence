@@ -1,0 +1,361 @@
+-- prince https://discord.gg/TBBAUZu8cW
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local NetworkClient = game:GetService("NetworkClient")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local environment = if getgenv then getgenv() else _G
+local RUNTIME_KEY = "__HOOK_ANTI_ANTI_RECONSTRUCTION"
+local previousRuntime = environment[RUNTIME_KEY]
+
+if type(previousRuntime) == "table" and type(previousRuntime.destroy) == "function" then
+    pcall(previousRuntime.destroy)
+end
+
+local runtime = {
+    alive = true,
+    enabled = false,
+    awaitingKey = false,
+    boundKey = Enum.KeyCode.Q,
+    character = nil,
+    rootPart = nil,
+    fakeRoot = nil,
+    repRootOwner = nil,
+    stepConnection = nil,
+    connections = {},
+    settingsRestore = {},
+    captureGeneration = 0,
+}
+
+environment[RUNTIME_KEY] = runtime
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(runtime.connections, connection)
+    return connection
+end
+
+local function disconnect(connection)
+    if connection then
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+end
+
+local function createInstance(className, properties, parent)
+    local object = Instance.new(className)
+    for property, value in pairs(properties or {}) do
+        object[property] = value
+    end
+    if parent then
+        object.Parent = parent
+    end
+    return object
+end
+
+local function tweenObject(object, duration, goals)
+    local animation = TweenService:Create(
+        object,
+        TweenInfo.new(duration, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+        goals
+    )
+    animation:Play()
+    return animation
+end
+
+local function isBasePart(instance)
+    if not instance then return false end
+    local ok, result = pcall(function() return instance:IsA("BasePart") end)
+    return ok and result == true
+end
+
+local function getRootPart(character)
+    character = character or LocalPlayer.Character
+    if not character then return nil end
+    local ok, root = pcall(function() return character:FindFirstChild("HumanoidRootPart") end)
+    return (ok and isBasePart(root)) and root or nil
+end
+
+local function findGlobalFunction(...)
+    for index = 1, select("#", ...) do
+        local name = select(index, ...)
+        local value = rawget(environment, name)
+        if type(value) == "function" then return value end
+    end
+    return nil
+end
+
+local function setHiddenProperty(instance, property, value)
+    if not instance then return false end
+    local setter = findGlobalFunction("sethiddenproperty", "set_hidden_property", "sethiddenprop", "set_hidden_prop")
+    if setter then
+        local ok = pcall(setter, instance, property, value)
+        if ok then return true end
+    end
+    return pcall(function() instance[property] = value end)
+end
+
+local function getHiddenProperty(instance, property)
+    if not instance then return false, nil end
+    local getter = findGlobalFunction("gethiddenproperty", "get_hidden_property", "gethiddenprop", "get_hidden_prop")
+    if getter then
+        local ok, value = pcall(getter, instance, property)
+        if ok then return true, value end
+    end
+    local ok, value = pcall(function() return instance[property] end)
+    return ok, value
+end
+
+local function registerSettingRestore(instance, property)
+    local ok, value = pcall(function() return instance[property] end)
+    if ok then
+        table.insert(runtime.settingsRestore, {instance = instance, property = property, value = value})
+    end
+end
+
+local function applyPublicSetting(instance, property, value)
+    if not instance then return false end
+    registerSettingRestore(instance, property)
+    return pcall(function() instance[property] = value end)
+end
+
+local function configureNetworkSettings()
+    setHiddenProperty(LocalPlayer, "MaximumSimulationRadius", math.huge)
+    setHiddenProperty(LocalPlayer, "SimulationRadius", math.huge)
+    pcall(function()
+        applyPublicSetting(settings().Network, "InterpolationThrottling", Enum.InterpolationThrottlingMode.Disabled)
+    end)
+    pcall(function()
+        local physics = settings().Physics
+        applyPublicSetting(physics, "PhysicsEnvironmentalThrottle", Enum.EnviromentalPhysicsThrottle.Disabled)
+        applyPublicSetting(physics, "AllowSleep", false)
+    end)
+    pcall(function() NetworkClient:SetOutgoingKBPSLimit(math.huge) end)
+end
+
+configureNetworkSettings()
+
+local FAKE_ROOT_NAME = "DavidDesyncRoot"
+local FAKE_ROOT_Y = -2500
+local FAKE_ROOT_VELOCITY = Vector3.new(0, -1000, 0)
+
+local function isFakeRootValid()
+    local fake = runtime.fakeRoot
+    if not isBasePart(fake) then return false end
+    local ok, parent = pcall(function() return fake.Parent end)
+    return ok and parent ~= nil
+end
+
+local function destroyFakeRoot()
+    local fake = runtime.fakeRoot
+    runtime.fakeRoot = nil
+    if fake then pcall(function() fake:Destroy() end) end
+end
+
+local function restoreReplicationRoot()
+    local owner = runtime.repRootOwner or runtime.rootPart
+    if isBasePart(owner) then
+        setHiddenProperty(owner, "PhysicsRepRootPart", owner)
+    end
+    runtime.repRootOwner = nil
+end
+
+local function createFakeRoot(rootPart)
+    destroyFakeRoot()
+    local fake = createInstance("Part", {
+        Name = FAKE_ROOT_NAME,
+        Size = Vector3.new(2, 2, 1),
+        Anchored = true,
+        CanCollide = false,
+        CanTouch = false,
+        CanQuery = false,
+        Transparency = 1,
+        CFrame = CFrame.new(0, FAKE_ROOT_Y, 0),
+        AssemblyLinearVelocity = FAKE_ROOT_VELOCITY,
+    }, Workspace)
+    local ok, pos = pcall(function() return rootPart.Position end)
+    if ok then fake.CFrame = CFrame.new(pos.X, FAKE_ROOT_Y, pos.Z) end
+    runtime.fakeRoot = fake
+    return fake
+end
+
+local function assignFakeReplicationRoot(rootPart, fake)
+    if not isBasePart(rootPart) or not isBasePart(fake) then return false end
+    setHiddenProperty(rootPart, "PhysicsRepRootPart", rootPart)
+    runtime.repRootOwner = rootPart
+    return setHiddenProperty(rootPart, "PhysicsRepRootPart", fake)
+end
+
+local function stepDesync()
+    if not runtime.alive or not runtime.enabled then return end
+    local root = runtime.rootPart
+    if not isBasePart(root) then
+        root = getRootPart(runtime.character)
+        runtime.rootPart = root
+    end
+    if not root then return end
+    if not isFakeRootValid() then
+        local fake = createFakeRoot(root)
+        assignFakeReplicationRoot(root, fake)
+        return
+    end
+    local fake = runtime.fakeRoot
+    local ok, rootPos, fakePos = pcall(function() return root.Position, fake.Position end)
+    if ok and (math.abs(rootPos.X - fakePos.X) > 0.01 or math.abs(rootPos.Z - fakePos.Z) > 0.01 or math.abs(fakePos.Y - FAKE_ROOT_Y) > 0.01) then
+        pcall(function() fake.CFrame = CFrame.new(rootPos.X, FAKE_ROOT_Y, rootPos.Z) end)
+    end
+    pcall(function()
+        fake.Anchored = true
+        fake.AssemblyLinearVelocity = FAKE_ROOT_VELOCITY
+    end)
+    local gotValue, current = getHiddenProperty(root, "PhysicsRepRootPart")
+    if not gotValue or current ~= fake then
+        setHiddenProperty(root, "PhysicsRepRootPart", fake)
+    end
+end
+
+local function stopStepConnection()
+    disconnect(runtime.stepConnection)
+    runtime.stepConnection = nil
+end
+
+local function startStepConnection()
+    stopStepConnection()
+    runtime.stepConnection = RunService.Stepped:Connect(stepDesync)
+end
+
+local function bindCharacter(character)
+    local oldRoot = runtime.rootPart
+    runtime.character = character
+    runtime.rootPart = getRootPart(character)
+    if runtime.enabled then
+        if isBasePart(oldRoot) and oldRoot ~= runtime.rootPart then
+            setHiddenProperty(oldRoot, "PhysicsRepRootPart", oldRoot)
+        end
+        destroyFakeRoot()
+        local root = runtime.rootPart
+        if not root and character then
+            local ok, waited = pcall(function() return character:WaitForChild("HumanoidRootPart", 8) end)
+            if ok and isBasePart(waited) then
+                root = waited
+                runtime.rootPart = root
+            end
+        end
+        if root then
+            assignFakeReplicationRoot(root, createFakeRoot(root))
+            startStepConnection()
+        end
+    end
+end
+
+bindCharacter(LocalPlayer.Character)
+connect(LocalPlayer.CharacterAdded, function(char) task.defer(bindCharacter, char) end)
+
+local Gui = createInstance("ScreenGui", {Name = "HookAntiAntiUI", IgnoreGuiInset = true, ResetOnSpawn = false, DisplayOrder = 999, Parent = LocalPlayer:WaitForChild("PlayerGui")})
+local MainFrame = createInstance("Frame", {Name = "Main", Active = true, ClipsDescendants = true, Position = UDim2.new(0.5, -155, 0.5, -90), Size = UDim2.new(0, 310, 0, 175), BackgroundColor3 = Color3.fromRGB(12, 3, 12), BackgroundTransparency = 0.08, BorderSizePixel = 0, Parent = Gui})
+createInstance("UICorner", {CornerRadius = UDim.new(0, 16)}, MainFrame)
+local Stroke = createInstance("UIStroke", {Color = Color3.fromRGB(255, 255, 255), Thickness = 1.8, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, MainFrame)
+local Gradient = createInstance("UIGradient", {Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromRGB(75, 0, 125)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(75, 0, 125))}), Rotation = 173.9, Parent = Stroke})
+local Backdrop = createInstance("ImageLabel", {Name = "Backdrop", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 10, 0, -5), Size = UDim2.new(0, 210, 1, 10), BackgroundTransparency = 1, Image = "rbxasset://textures/vJwJOFW3b0u1.png", ImageTransparency = 0.22, ScaleType = Enum.ScaleType.Crop, Parent = MainFrame})
+createInstance("UICorner", {CornerRadius = UDim.new(0, 16)}, Backdrop)
+local ListLayout = createInstance("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder})
+local ToggleRow = createInstance("Frame", {Name = "Toggle", Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = Color3.fromRGB(26, 6, 22), BackgroundTransparency = 0.25, BorderSizePixel = 0, Parent = createInstance("Frame", {Position = UDim2.new(0, 18, 0, 48), Size = UDim2.new(1, -28, 1, -54), BackgroundTransparency = 1, Parent = MainFrame})})
+ListLayout.Parent = ToggleRow.Parent
+createInstance("UICorner", {CornerRadius = UDim.new(0, 10)}, ToggleRow)
+local StatusLabel = createInstance("TextLabel", {Position = UDim2.new(0, 14, 0, 24), Size = UDim2.new(1, -74, 0, 14), BackgroundTransparency = 1, Text = "OFF", TextColor3 = Color3.fromRGB(140, 110, 145), TextSize = 9, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, Parent = ToggleRow})
+local ToggleTrack = createInstance("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.new(0, 44, 0, 22), BackgroundColor3 = Color3.fromRGB(32, 6, 26), BorderSizePixel = 0, Parent = ToggleRow})
+local ToggleKnob = createInstance("Frame", {Position = UDim2.new(0, 3, 0, 3), Size = UDim2.new(0, 16, 0, 16), BackgroundColor3 = Color3.fromRGB(255, 255, 255), BorderSizePixel = 0, Parent = ToggleTrack})
+createInstance("UICorner", {CornerRadius = UDim.new(1, 0)}, ToggleKnob)
+local ToggleHit = createInstance("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "", Parent = ToggleRow})
+local KeybindRow = createInstance("Frame", {Name = "Keybind", Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = Color3.fromRGB(26, 6, 22), BackgroundTransparency = 0.25, BorderSizePixel = 0, Parent = ToggleRow.Parent})
+createInstance("UICorner", {CornerRadius = UDim.new(0, 10)}, KeybindRow)
+local KeybindBtn = createInstance("TextButton", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.new(0, 76, 0, 26), BackgroundColor3 = Color3.fromRGB(18, 4, 20), BackgroundTransparency = 0.3, Text = "Q", TextColor3 = Color3.fromRGB(217, 70, 239), TextSize = 11, Font = Enum.Font.GothamBlack, AutoButtonColor = false, Parent = KeybindRow})
+createInstance("UICorner", {CornerRadius = UDim.new(0, 6)}, KeybindBtn)
+
+local function triggerRipple(parent)
+    local mouse = UserInputService:GetMouseLocation()
+    local pos = parent.AbsolutePosition
+    local img = createInstance("ImageLabel", {BackgroundTransparency = 1, Image = "rbxassetid://266543268", ImageColor3 = Color3.fromRGB(217, 70, 239), ImageTransparency = 0.4, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, mouse.X - pos.X, 0, mouse.Y - pos.Y), ZIndex = 30, Parent = parent})
+    tweenObject(img, 0.45, {Size = UDim2.new(0, 100, 0, 100), ImageTransparency = 1}).Completed:Connect(function() img:Destroy() end)
+end
+
+local function applyVisual(enabled)
+    StatusLabel.Text = enabled and "ACTIVE" or "OFF"
+    StatusLabel.TextColor3 = enabled and Color3.fromRGB(217, 70, 239) or Color3.fromRGB(140, 110, 145)
+    tweenObject(ToggleTrack, 0.18, {BackgroundColor3 = enabled and Color3.fromRGB(122, 30, 134) or Color3.fromRGB(32, 6, 26)})
+    tweenObject(ToggleKnob, 0.18, {Position = enabled and UDim2.new(1, -19, 0, 3) or UDim2.new(0, 3, 0, 3)})
+end
+
+local function setEnabled(val)
+    runtime.enabled = (val == true)
+    applyVisual(runtime.enabled)
+    if runtime.enabled then
+        local root = getRootPart(runtime.character)
+        if not root then runtime.enabled = false; applyVisual(false); return end
+        assignFakeReplicationRoot(root, createFakeRoot(root))
+        startStepConnection()
+    else
+        stopStepConnection()
+        restoreReplicationRoot()
+        destroyFakeRoot()
+    end
+end
+
+connect(ToggleHit.MouseButton1Click, function() triggerRipple(ToggleRow); setEnabled(not runtime.enabled) end)
+connect(KeybindBtn.MouseButton1Click, function()
+    runtime.awaitingKey = true
+    runtime.captureGeneration += 1
+    local gen = runtime.captureGeneration
+    task.spawn(function()
+        for i = 1, 3 do
+            if not runtime.awaitingKey or gen ~= runtime.captureGeneration then return end
+            KeybindBtn.Text = string.rep(".", i)
+            task.wait(0.15)
+        end
+    end)
+end)
+
+connect(UserInputService.InputBegan, function(input, gameProcessed)
+    if runtime.awaitingKey then
+        if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode ~= Enum.KeyCode.Escape then
+            runtime.boundKey = input.KeyCode
+            runtime.awaitingKey = false
+            KeybindBtn.Text = input.KeyCode.Name
+        end
+        return
+    end
+    if not gameProcessed and input.KeyCode == runtime.boundKey then setEnabled(not runtime.enabled) end
+end)
+
+local dragStart, startPos, dragging
+connect(MainFrame.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+    end
+end)
+
+connect(UserInputService.InputChanged, function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+connect(UserInputService.InputEnded, function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
+connect(RunService.RenderStepped, function(dt) Gradient.Rotation = (Gradient.Rotation + dt * 140) % 360 end)
+
+runtime.destroy = function()
+    runtime.alive = false
+    stopStepConnection()
+    restoreReplicationRoot()
+    destroyFakeRoot()
+    for _, c in ipairs(runtime.connections) do disconnect(c) end
+    for _, e in ipairs(runtime.settingsRestore) do pcall(function() e.instance[e.property] = e.value end) end
+    Gui:Destroy()
+end
